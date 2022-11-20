@@ -1,0 +1,16 @@
+# Prepare data in pytorch dataset format
+python script_prepare_dataset.py -visible_gpus='-1' -bert_model='vinai/phobert-large' -max_rows=500 -max_src_len=512 -max_tgt_len=90 -train_csv_path='data/viWikiHow-Abs-Sum/train_segmented_uitws.tsv' -valid_csv_path='data/viWikiHow-Abs-Sum/valid_segmented_uitws.tsv' -test_csv_path='data/viWikiHow-Abs-Sum/test_segmented_uitws.tsv'
+
+# Experiments with native PhoBERT encoder on 256 tokens truncated datasets to find which Word Segmenter is the best
+python script_train_model.py -visible_gpus='0,1' -quick_test=True -bert_model='vinai/phobert-large' -max_src_len=256 -max_tgt_len=90 -train_data_path='data/viWikiHow-Abs-Sum/train_segmented_rdrsegmenter_256tokens.pt' -valid_data_path='data/viWikiHow-Abs-Sum/valid_segmented_rdrsegmenter_256tokens.pt'
+python script_train_model.py -visible_gpus='0,1' -quick_test=True -bert_model='vinai/phobert-large' -max_src_len=256 -max_tgt_len=90 -train_data_path='data/viWikiHow-Abs-Sum/train_segmented_uetsegmenter_256tokens.pt' -valid_data_path='data/viWikiHow-Abs-Sum/valid_segmented_uetsegmenter_256tokens.pt'
+python script_train_model.py -visible_gpus='0,1' -quick_test=True -bert_model='vinai/phobert-large' -max_src_len=256 -max_tgt_len=90 -train_data_path='data/viWikiHow-Abs-Sum/train_segmented_uitws_256tokens.pt' -valid_data_path='data/viWikiHow-Abs-Sum/valid_segmented_uitws_256tokens.pt'
+
+# Final training experiments
+python script_train_model.py -visible_gpus='0,1' -quick_test=True -bert_model='vinai/phobert-large' -max_src_len=512 -max_tgt_len=90 -train_data_path='data/viWikiHow-Abs-Sum/train_segmented_rdrsegmenter_512tokens.pt' -valid_data_path='data/viWikiHow-Abs-Sum/valid_segmented_rdrsegmenter_512tokens.pt'
+python script_train_model.py -visible_gpus='0,1' -quick_test=True -bert_model='vinai/phobert-large' -max_src_len=512 -max_tgt_len=90 -train_data_path='data/viWikiHow-Abs-Sum/train_segmented_uetsegmenter_512tokens.pt' -valid_data_path='data/viWikiHow-Abs-Sum/valid_segmented_uetsegmenter_512tokens.pt'
+python script_train_model.py -visible_gpus='0,1' -quick_test=True -bert_model='vinai/phobert-large' -max_src_len=512 -max_tgt_len=90 -train_data_path='data/viWikiHow-Abs-Sum/train_segmented_uitws_512tokens.pt' -valid_data_path='data/viWikiHow-Abs-Sum/valid_segmented_uitws_512tokens.pt'
+python script_train_model.py -visible_gpus='0,1' -quick_test=True -bert_model='bert-base-multilingual-cased' -max_src_len=512 -max_tgt_len=90 -train_data_path='data/viWikiHow-Abs-Sum/train_512tokens.pt' -valid_data_path='data/viWikiHow-Abs-Sum/valid_512tokens.pt'
+
+# Evaluation
+python script_evaluate_model.py -visible_gpus='0,1' -quick_test=True -mode='eval' -bert_model='vinai/phobert-large' -max_src_len=256 -max_tgt_len=90 -min_tgt_len=10 -block_ngram_repeat=3 -model_path='/Users/hieunguyen/Desktop/NLP/BertSumVN/Experiments with Word Segmenters/RDRSegmenter/Checkpoint_10.pt' -config_path='/Users/hieunguyen/Desktop/NLP/BertSumVN/Experiments with Word Segmenters/RDRSegmenter/config.json' -data_path='data/viWikiHow-Abs-Sum/test_segmented_rdrsegmenter_256tokens.pt'
