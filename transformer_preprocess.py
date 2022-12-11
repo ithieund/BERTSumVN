@@ -1,8 +1,8 @@
 import torch
 import pandas as pd
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data import (DataLoader, RandomSampler, TensorDataset)
-from tqdm import tqdm
+from torch.utils.data import (DataLoader, SequentialSampler, RandomSampler, TensorDataset)
+from tqdm.auto import tqdm
 from transformer_utils import get_logger
 
 logger = get_logger(__name__)
@@ -28,13 +28,17 @@ class DataProcessor():
 		dataset = TensorDataset(all_guid, all_src_ids, all_src_mask, all_tgt_ids, all_tgt_mask)
 		return dataset
 
-	def create_dataloader(self, dataset, batch_size):
-		data_sampler = RandomSampler(dataset)
+	def create_dataloader(self, dataset, batch_size, shuffle=True):
+		if (shuffle):
+			data_sampler = RandomSampler(dataset)
+		else:
+			data_sampler = SequentialSampler(dataset)
+
 		dataloader = DataLoader(dataset, sampler=data_sampler, batch_size=batch_size, drop_last=True)
 		return dataloader
 
-	def create_distributed_dataloader(self, rank, world_size, dataset, batch_size):
-		data_sampler = DistributedSampler(dataset, rank=rank, num_replicas=world_size, shuffle=True)
+	def create_distributed_dataloader(self, rank, world_size, dataset, batch_size, shuffle=True):
+		data_sampler = DistributedSampler(dataset, rank=rank, num_replicas=world_size, shuffle=shuffle)
 		dataloader = DataLoader(dataset, sampler=data_sampler, batch_size=batch_size, drop_last=True, shuffle=False)
 		return dataloader
 		
@@ -54,7 +58,7 @@ class CSVProcessor(DataProcessor):
 
 		samples = []
 
-		for index, row in tqdm(df.iterrows(), total=len(df), desc='Rows'):
+		for index, row in tqdm(df.iterrows(), total=len(df), desc='Rows', position=0, leave=True, ascii=True):
 			guid = row['guid']
 			src = row['article']
 			tgt = row['abstract']

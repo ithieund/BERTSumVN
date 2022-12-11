@@ -8,8 +8,9 @@ import shutil
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel
 from datetime import datetime
+from tqdm.auto import tqdm
+from torch.nn.parallel import DistributedDataParallel
 from torch.nn.init import xavier_normal_
 from transformers import AutoTokenizer, AutoModel
 from transformers import AdamW, get_linear_schedule_with_warmup
@@ -17,7 +18,8 @@ from transformer_model import BertAbsSum
 from transformer_preprocess import DataProcessor
 from transformer_utils import *
 from params_helper import Constants, Params
-from tqdm import tqdm
+
+set_seed(0)
 
 # Setup logger
 logger = get_logger(__name__)
@@ -42,7 +44,7 @@ bert_model = AutoModel.from_pretrained(Params.bert_model, local_files_only=False
 
 def init_process(rank, world_size):
 	os.environ['MASTER_ADDR'] = '127.0.0.1'
-	os.environ['MASTER_PORT'] = '9999'
+	os.environ['MASTER_PORT'] = Params.ddp_master_port
 
 	backend = 'nccl' if torch.cuda.is_available() else 'gloo'
 
@@ -51,15 +53,6 @@ def init_process(rank, world_size):
 		rank=rank,
 		world_size=world_size
 	)
-
-
-def set_seed(seed):
-	if torch.cuda.is_available():
-		torch.cuda.manual_seed_all(seed)
-	else:
-		random.seed(seed)
-		np.random.seed(seed)
-		torch.manual_seed(seed)
 
 
 def get_model(rank, device, checkpoint, output_dir):
@@ -83,9 +76,14 @@ def get_model(rank, device, checkpoint, output_dir):
 		decoder_config['d_k'] = Params.decoder_attention_dim
 		decoder_config['d_v'] = Params.decoder_attention_dim
 		decoder_config['d_model'] = bert_config.hidden_size
-		decoder_config['d_inner'] = decoder_config['d_model']
+		decoder_config['d_inner'] = bert_config.intermediate_size
 
-		config = {'bert_config': bert_config.__dict__, 'decoder_config': decoder_config}
+		config = {
+			'bert_model': Params.bert_model,
+			'bert_config': bert_config.__dict__,
+			'decoder_config': decoder_config,
+			'freeze_encoder': Params.freeze_encoder
+		}
 
 	# Save config to output directory
 	if (rank == 0):
@@ -95,8 +93,7 @@ def get_model(rank, device, checkpoint, output_dir):
 		with open(out_config_path, 'w') as f:
 			json.dump(config, f, indent=4)
 
-	config['freeze_encoder'] = Params.freeze_encoder
-	model = BertAbsSum(bert_model_path=Params.bert_model, config=config, device=device)
+	model = BertAbsSum(config=config, device=device)
 
 	if checkpoint is not None:
 		logger.info(f'Loading model from checkpoint')
@@ -137,7 +134,7 @@ def get_valid_dataloader(rank, world_size):
 	processor = DataProcessor()
 
 	valid_dataset = torch.load(Params.valid_data_path)
-	valid_dataloader = processor.create_dataloader(valid_dataset, Params.valid_batch_size)
+	valid_dataloader = processor.create_dataloader(valid_dataset, Params.valid_batch_size, shuffle=False)
 
 	check_data(valid_dataloader)
 	return valid_dataloader
@@ -157,12 +154,12 @@ def check_data(dataloader):
 		logger.info(f'Source: {tokenizer.decode((batch_src_ids[i]), skip_special_tokens=True)}')
 		logger.info(f'Target: {tokenizer.decode((batch_tgt_ids[i]), skip_special_tokens=True)}')
 
-def cal_performance(logits, ground, smoothing=True):
+def cal_performance(logits, ground):
 	ground = ground[:, 1:]
 	logits = logits.view(-1, logits.size(-1))
 	ground = ground.contiguous().view(-1)
 
-	loss = cal_loss(logits, ground, smoothing=smoothing)
+	loss = cal_loss(logits, ground)
 
 	pad_mask = ground.ne(Constants.PAD)
 	pred = logits.max(-1)[1]
@@ -172,9 +169,8 @@ def cal_performance(logits, ground, smoothing=True):
 	return loss, correct, n_tokens
 
 
-def cal_loss(logits, ground, smoothing=True):
-	def label_smoothing(logits, labels):
-		eps = 0.1
+def cal_loss(logits, ground):
+	def label_smoothing(logits, labels, eps):
 		num_classes = logits.size(-1)
 
 		# >>> z = torch.zeros(2, 4).scatter_(1, torch.tensor([[2], [3]]), 1.23)
@@ -189,8 +185,8 @@ def cal_loss(logits, ground, smoothing=True):
 		loss = loss.masked_select(non_pad_mask).mean()
 		return loss
 
-	if smoothing:
-		loss = label_smoothing(logits, ground)
+	if Params.label_smoothing_factor > 0:
+		loss = label_smoothing(logits, ground, Params.label_smoothing_factor)
 	else:
 		loss = F.cross_entropy(logits, ground, ignore_index=Constants.PAD)
 		# criterion = nn.CrossEntropyLoss(ignore_index=Constants.PAD)
@@ -206,7 +202,7 @@ def init_parameters(model):
 
 
 def do_validate(valid_dataloader, model, device, epoch_no):
-	valid_iterator = tqdm(valid_dataloader, desc=f'Validate epoch {epoch_no}', position=0)
+	valid_iterator = tqdm(valid_dataloader, desc=f'Validate epoch {epoch_no}', position=0, leave=True, ascii=True)
 	model.eval()
 	epoch_avg_valid_loss = 0
 	total_valid_loss = 0
@@ -277,7 +273,6 @@ def cleanup_older_checkpoints(output_dir, current_epoch):
 def train(rank, world_size, output_dir):
 	print('\n\n')
 	init_process(rank, world_size)
-	set_seed(0)
 
 	device = torch.device(f'cuda:{rank}') if torch.cuda.is_available() else torch.device('cpu')
 	checkpoint = None
@@ -309,6 +304,9 @@ def train(rank, world_size, output_dir):
 	if checkpoint is not None:
 		logger.info(f'Loading optimizer from checkpoint')
 		optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+	# Free up memory
+	del checkpoint
 
 	num_train_samples = len(train_dataloader.dataset)
 	num_train_steps_total = int(num_train_samples / Params.train_batch_size) * Params.num_train_epochs
@@ -344,10 +342,12 @@ def train(rank, world_size, output_dir):
 	global_step = 0
 	best_model_checkpoint = Params.last_best_checkpoint
 	best_eval_score = Params.last_best_eval_score
-	early_stop_counter = 0	# Early stopping will be activated when the counter >= patient
+	early_stop_counter = 0	# Early stopping will be activated when the counter >= patience
 
 	training_log = {
 		'arguments': vars(Params),
+		'start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+		'finish_time': '',
 		'best_model': {
 			'epoch_no': 0,
 			'eval_score': 0
@@ -371,7 +371,7 @@ def train(rank, world_size, output_dir):
 		model.train()
 		total_train_loss = 0
 		train_examples_num, train_steps_num = 0, 0
-		train_iterator = tqdm(train_dataloader, desc=f'Training epoch {epoch_no}', position=0)
+		train_iterator = tqdm(train_dataloader, desc=f'Training epoch {epoch_no}', position=0, leave=True, ascii=True)
 
 		for step, batch in enumerate(train_iterator):
 			step = step + 1
@@ -532,16 +532,18 @@ def train(rank, world_size, output_dir):
 			save_training_log(output_dir, training_log)
 
 			if early_stop_counter > 0:
-				logger.info(f'Early stopping counter: {early_stop_counter}/{Params.early_stopping_patient}')
+				logger.info(f'Early stopping counter: {early_stop_counter}/{Params.early_stopping_patience}')
 
 			# Activate early stopping
-			if early_stop_counter >= Params.early_stopping_patient:
+			if Params.early_stopping_patience > 0 and early_stop_counter >= Params.early_stopping_patience:
 				logger.info(f'Early stopping at epoch {epoch_no}')
 				# logger.info(f'Saving best model of epoch {best_model_checkpoint} with best score {-best_eval_score}')
 				# shutil.copyfile(os.path.join(output_dir, f'Checkpoint_{epoch_no}.pt'), os.path.join(output_dir, f'Best_Checkpoint.pt'))
 				break
 
 	if rank == 0:
+		training_log['finish_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+		save_training_log(output_dir, training_log)
 		logger.info('Training finished')
 		sys.exit(0)
 
@@ -566,7 +568,10 @@ if __name__ == '__main__':
 	try:
 		# Setup output path
 		normalized_model_name = Params.bert_model.replace('/', '_')
-		output_dir = os.path.join(Params.output_dir, datetime.now().strftime(f'model_{normalized_model_name}_{Params.max_src_len}_%Y.%m.%d_%H.%M.%S'))
+		dataset_name = os.path.basename(os.path.dirname(Params.train_data_path))
+		timestamp = datetime.now().strftime('%Y.%m.%d_%H.%M.%S')
+		model_dir = f'model_{normalized_model_name}_{Params.decoder_layers_num}layers_{dataset_name}_{Params.max_src_len}tokens_{Params.num_train_epochs}epochs_espatience{Params.early_stopping_patience}_lbsmoothing{Params.label_smoothing_factor}_{timestamp}'
+		output_dir = os.path.join(Params.output_dir, model_dir)
 		os.makedirs(output_dir, exist_ok=True)
 		logger.info(f'Model output dir: {output_dir}')
 
@@ -586,6 +591,7 @@ if __name__ == '__main__':
 		cleanup_on_error(output_dir)
 		sys.exit(0)
 	except BaseException as error:
-		logger.info('Program error!')
-		cleanup_on_error(output_dir)
-		raise error
+		if error:
+			logger.info('Program error!')
+			cleanup_on_error(output_dir)
+			raise error

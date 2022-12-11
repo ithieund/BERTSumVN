@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import operator
+from torch.nn.functional import log_softmax
 from queue import PriorityQueue
 from transformer.Layers import EncoderLayer, DecoderLayer
 from transformer.Models2 import get_non_pad_mask, get_sinusoid_encoding_table, get_attn_key_pad_mask, get_subsequent_mask
@@ -38,11 +39,11 @@ class BertDecoder(nn.Module):
 		d_k = decoder_config['d_k']
 		d_v = decoder_config['d_v']
 		d_model = decoder_config['d_model']
-		d_inner = decoder_config['d_inner']  # should be equal to d_model
+		d_inner = decoder_config['d_inner']
 		vocab_size = decoder_config['vocab_size']
 
 		self.sequence_embedding = BertEmbeddings(config=bert_config)
-		self.position_embedding = BertPositionEmbedding(max_seq_len=Constants.MAX_TGT_SEQ_LEN, hidden_size=d_inner)
+		self.position_embedding = BertPositionEmbedding(max_seq_len=Constants.MAX_TGT_SEQ_LEN, hidden_size=d_model)
 		self.layer_stack = nn.ModuleList([DecoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout) for _ in range(n_layers)])
 		self.last_linear = nn.Linear(in_features=d_model, out_features=vocab_size)
 
@@ -76,16 +77,18 @@ class BertDecoder(nn.Module):
 			dec_slf_attn_list.append(dec_slf_attn)
 			dec_enc_attn_list.append(dec_enc_attn)
 
-		return self.last_linear(dec_output)
+		batch_logits = self.last_linear(dec_output)
+
+		return batch_logits, dec_enc_attn_list
 
 
 class BertAbsSum(nn.Module):
-	def __init__(self, bert_model_path, config, device):
+	def __init__(self, config, device):
 		super().__init__()
 
 		self.device = device
 		self.config = config
-		self.encoder = AutoModel.from_pretrained(bert_model_path)
+		self.encoder = AutoModel.from_pretrained(config['bert_model'])
 
 		# Freeze encoder
 		if config['freeze_encoder'] == True:
@@ -120,7 +123,7 @@ class BertAbsSum(nn.Module):
 
 		# TODO: pass invterval token_type_ids as addition info like PreSum
 		batch_enc_output = self.batch_encode_src_seq(batch_src_seq=batch_src_seq, batch_src_mask=batch_src_mask)  							# [batch_size, seq_len, hidden_size]	
-		batch_logits = self.decoder.forward(batch_src_seq=batch_src_seq, batch_enc_output=batch_enc_output, batch_tgt_seq=batch_tgt_seq)	# [batch_size, seq_len, vocab_size]
+		batch_logits, _ = self.decoder.forward(batch_src_seq=batch_src_seq, batch_enc_output=batch_enc_output, batch_tgt_seq=batch_tgt_seq)	# [batch_size, seq_len, vocab_size]
 		return batch_logits
 
 	def batch_encode_src_seq(self, batch_src_seq, batch_src_mask):
@@ -152,8 +155,8 @@ class BertAbsSum(nn.Module):
 		batch_dec_seq = batch_dec_seq.unsqueeze(-1).type_as(batch_src_seq)
 
 		for i in range(Constants.MAX_TGT_SEQ_LEN):
-			batch_logits = self.decoder.forward(batch_src_seq=batch_src_seq, batch_enc_output=batch_enc_output, batch_tgt_seq=batch_dec_seq)
-			dec_output = batch_logits.max(-1)[1]
+			output_logits, _ = self.decoder.forward(batch_src_seq=batch_src_seq, batch_enc_output=batch_enc_output, batch_tgt_seq=batch_dec_seq)
+			dec_output = output_logits.max(-1)[1]
 			dec_output = dec_output[:, -1]
 			batch_dec_seq = torch.cat((batch_dec_seq, dec_output.unsqueeze(-1)), 1)
 
@@ -168,14 +171,14 @@ class BertAbsSum(nn.Module):
 		batch_enc_output = self.batch_encode_src_seq(batch_src_seq=batch_src_seq, batch_src_mask=batch_src_mask)	# [batch_size, seq_len, hidden_size]
 		decoded_batch = []
 
-		# decoding goes sentence by sentence
+		# Decoding goes through each sample in the batch
 		for idx in range(batch_size):
 			logger.debug(f'Decoding sample {batch_guids[idx]}')
 			beam_src_seq = batch_src_seq[idx].unsqueeze(0).to(self.device)  # Batch with 1 sample
 			beam_enc_output = batch_enc_output[idx].unsqueeze(0)   # Batch with 1 sample
 
 			beams = []
-			start_node = BeamSearchNode(prev_node=None, token_id=Constants.BOS, log_prob=0)
+			start_node = BeamSearchNode(prev_node=None, token_id=Constants.BOS, log_prob=0, last_layer_attention=torch.zeros((Params.max_src_len)).to(self.device))
 			beams.append((-start_node.eval(), start_node))
 
 			end_nodes = []
@@ -193,8 +196,9 @@ class BertAbsSum(nn.Module):
 					# decode for one step using decoder
 					# logits shape: (batch_size, seq_len, vocab_size)
 					logger.debug('Getting decoder logits')
-					batch_logits = self.decoder.forward(batch_src_seq=beam_src_seq, batch_enc_output=beam_enc_output, batch_tgt_seq=beam_dec_seq)
-					log_probs = batch_logits[:, -1][0] # log_probs shape: (vocab_size)
+					output_logits, output_attentions = self.decoder.forward(batch_src_seq=beam_src_seq, batch_enc_output=beam_enc_output, batch_tgt_seq=beam_dec_seq)
+					# log_probs = output_logits[:, -1][0] # log_probs shape: (vocab_size)
+					log_probs = log_softmax(output_logits[:, -1][0], dim=-1)	# log_probs shape: (vocab_size)
 					sorted_probs, sorted_indices = torch.sort(log_probs, dim=-1, descending=True)
 					logger.debug('Logits sorted by log probs')
 
@@ -209,7 +213,8 @@ class BertAbsSum(nn.Module):
 						log_prob = sorted_probs[i].item()
 						i += 1
 				
-						next_node = BeamSearchNode(prev_node=node, token_id=decoded_token, log_prob=node.log_prob + log_prob)
+						cur_step_attention_from_last_layer = output_attentions[-1][:,-1][-1]	# Shape: (src_seq_len)
+						next_node = BeamSearchNode(prev_node=node, token_id=decoded_token, log_prob=node.log_prob + log_prob, last_layer_attention=cur_step_attention_from_last_layer)
 
 						# Block ngram repeats
 						if Params.block_ngram_repeat > 0:
@@ -282,9 +287,8 @@ class BertAbsSum(nn.Module):
 
 		return decoded_batch
 
-
 class BeamSearchNode(object):
-	def __init__(self, prev_node, token_id, log_prob):
+	def __init__(self, prev_node, token_id, log_prob, last_layer_attention = None):
 		self.finished = False   # Determine if the hypothesis decoding is finished
 		self.prev_node = prev_node
 		self.token_id = token_id
@@ -295,6 +299,11 @@ class BeamSearchNode(object):
 		else:
 			self.seq_tokens = prev_node.seq_tokens + [token_id]
 
+		if prev_node is None:
+			self.acc_attention = last_layer_attention
+		else:
+			self.acc_attention = prev_node.acc_attention + last_layer_attention
+
 		self.seq_len = len(self.seq_tokens)
 
 		if token_id == Constants.EOS:
@@ -302,13 +311,26 @@ class BeamSearchNode(object):
 
 	def set_log_prob(self, log_prob):
 		self.log_prob = log_prob
- 
-	def eval(self):
-		alpha = 1.0
-		reward = 0
 
-		# Add here a function for shaping a reward
-		return self.log_prob / float(self.seq_len - 1 + 1e-6) + alpha * reward
+	# Get beam sore using Wu's length normalization and coverage penalty (https://arxiv.org/abs/1609.08144)
+	# Adopt pytorch code from https://github.com/NVIDIA/DeepLearningExamples/blob/master/PyTorch/Translation/GNMT/seq2seq/inference/beam_search.py
+	def eval(self):
+		score = self.log_prob
+
+		# Set Params.len_norm_factor = 0 will disable length normalization
+		norm_const = 5
+		length_norm = (norm_const + self.seq_len) / (norm_const + 1.0)
+		length_norm = length_norm ** Params.len_norm_factor
+		score = score / length_norm
+
+		# Set Params.cov_penalty_factor = 0 will disable coverage penalty
+		coverage_penalty = self.acc_attention.clamp(0, 1)
+		coverage_penalty = coverage_penalty.log()
+		coverage_penalty[coverage_penalty == float('-inf')] = 0
+		coverage_penalty = coverage_penalty.sum(dim=-1)
+		score += Params.cov_penalty_factor * coverage_penalty
+  
+		return score
 
 	def __lt__(self, other):
 		return self.seq_len < other.seq_len
