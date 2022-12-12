@@ -2,8 +2,7 @@ import torch.nn as nn
 import torch
 import operator
 from torch.nn.functional import log_softmax
-from queue import PriorityQueue
-from transformer.Layers import EncoderLayer, DecoderLayer
+from transformer.Layers import DecoderLayer
 from transformer.Models2 import get_non_pad_mask, get_sinusoid_encoding_table, get_attn_key_pad_mask, get_subsequent_mask
 from transformers import AutoModel, BertConfig
 from transformers.models.bert.modeling_bert import BertEmbeddings
@@ -178,28 +177,26 @@ class BertAbsSum(nn.Module):
 			beam_enc_output = batch_enc_output[idx].unsqueeze(0)   # Batch with 1 sample
 
 			beams = []
-			start_node = BeamSearchNode(prev_node=None, token_id=Constants.BOS, log_prob=0, last_layer_attention=torch.zeros((Params.max_src_len)).to(self.device))
-			beams.append((-start_node.eval(), start_node))
+			start_node = BeamSearchNode(prev_node=None, token_id=Constants.BOS, log_prob=0)
+			beams.append((start_node.eval(), start_node))
 
 			end_nodes = []
 
 			# Start decoding process for each source sequence
 			for step in range(Constants.MAX_TGT_SEQ_LEN):
 				logger.debug(f'Decoding step {step} with {len(beams)} beams')
-				candidates = PriorityQueue()
+				candidates = []
 
 				for score, node in beams:
 					dec_seq = node.seq_tokens  # [id_1, id_2]
 					beam_dec_seq = torch.LongTensor(dec_seq).unsqueeze(0)  # Batch with 1 sample
 					beam_dec_seq.to(self.device)
 				
-					# decode for one step using decoder
-					# logits shape: (batch_size, seq_len, vocab_size)
+					# Decode for one step using decoder
 					logger.debug('Getting decoder logits')
 					output_logits, output_attentions = self.decoder.forward(batch_src_seq=beam_src_seq, batch_enc_output=beam_enc_output, batch_tgt_seq=beam_dec_seq)
-					# log_probs = output_logits[:, -1][0] # log_probs shape: (vocab_size)
-					log_probs = log_softmax(output_logits[:, -1][0], dim=-1)	# log_probs shape: (vocab_size)
-					sorted_probs, sorted_indices = torch.sort(log_probs, dim=-1, descending=True)
+					log_probs = log_softmax(output_logits[:, -1][0], dim=-1)	# output_logits shape: (batch_size, seq_len, vocab_size); log_probs shape: (vocab_size)
+					sorted_log_probs, sorted_indices = torch.sort(log_probs, dim=-1, descending=True)
 					logger.debug('Logits sorted by log probs')
 
 					# Collect top beam_size candidates for this beam instance
@@ -210,11 +207,10 @@ class BertAbsSum(nn.Module):
 						logger.debug(f'Collecting candidate {candidate_count}')
 						logger.debug(f'Hypothesis {i}')
 						decoded_token = sorted_indices[i].item()
-						log_prob = sorted_probs[i].item()
+						log_prob = sorted_log_probs[i].item()
 						i += 1
-				
-						cur_step_attention_from_last_layer = output_attentions[-1][:,-1][-1]	# Shape: (src_seq_len)
-						next_node = BeamSearchNode(prev_node=node, token_id=decoded_token, log_prob=node.log_prob + log_prob, last_layer_attention=cur_step_attention_from_last_layer)
+
+						next_node = BeamSearchNode(prev_node=node, token_id=decoded_token, log_prob=node.log_prob + log_prob)
 
 						# Block ngram repeats
 						if Params.block_ngram_repeat > 0:
@@ -223,7 +219,7 @@ class BertAbsSum(nn.Module):
 							has_repeats = False
 							gram = []
 
-							for j in range(step):
+							for j in range(len(next_node.seq_tokens)):
 								# A gram is combination of the last n tokens where n = block_ngram_repeat param
 								gram = (gram + [next_node.seq_tokens[j]])[-Params.block_ngram_repeat:]
 								
@@ -240,9 +236,10 @@ class BertAbsSum(nn.Module):
 								else:
 									ngrams.add(tuple(gram))
 
-							# Set this candiate log_prob to a really small value to prevent it from expanding its path
+							# Add penalty to this hypothesis to prevent it from expanding its path
 							if has_repeats:
-								next_node.set_log_prob(-10e20)
+								penaltized_log_prob = next_node.log_prob + (-10e20)
+								next_node.set_log_prob(penaltized_log_prob)
 						
 						# This candidate finished its path
 						if decoded_token == Constants.EOS:
@@ -251,12 +248,12 @@ class BertAbsSum(nn.Module):
 							if Params.min_tgt_len > 0:
 								# Collect this end node if it has valid sequence length
 								if next_node.seq_len >= Params.min_tgt_len:
-									end_nodes.append((-next_node.eval(), next_node))
+									end_nodes.append((next_node.eval(), next_node))
 							else:
-									end_nodes.append((-next_node.eval(), next_node))
+								end_nodes.append((next_node.eval(), next_node))
 						# This candidate is still expanding
 						else:
-							candidates.put((-next_node.eval(), next_node))
+							candidates.append((next_node.eval(), next_node))
 							candidate_count += 1
 
 				# Stop decoding as we found enough end nodes
@@ -264,20 +261,24 @@ class BertAbsSum(nn.Module):
 					break
 
 				# Collect beam_size best candidates for next time step decoding
-				logger.debug(f'Candidates count: {candidates.qsize()}')
-				beams = [candidates.get() for _ in range(beam_size)]
+				logger.debug(f'Candidates count: {len(candidates)}')
+				sorted_candidates = sorted(candidates, key=operator.itemgetter(0), reverse=True)
+				beams = []	# Reset beam list here to maintain only beam_size hypothesis
+    
+				for i in range(beam_size):
+					beams.append(sorted_candidates[i])
 
 			# Get n_best hypotheses at the end of decoding process
 			logger.debug(f'Collecting {n_best} best hypotheses')
 			best_hypotheses = []
 
-			sorted_beams = sorted(beams, key=operator.itemgetter(0))
+			sorted_beams = sorted(beams, key=operator.itemgetter(0), reverse=True)
 
 			if len(end_nodes) < n_best:
 				for i in range(n_best - len(end_nodes)):
 					end_nodes.append(sorted_beams[i])
 
-			sorted_end_nodes = sorted(end_nodes, key=operator.itemgetter(0))
+			sorted_end_nodes = sorted(end_nodes, key=operator.itemgetter(0), reverse=True)
 
 			for i in range(n_best):
 				score, end_node = sorted_end_nodes[i]
@@ -288,7 +289,7 @@ class BertAbsSum(nn.Module):
 		return decoded_batch
 
 class BeamSearchNode(object):
-	def __init__(self, prev_node, token_id, log_prob, last_layer_attention = None):
+	def __init__(self, prev_node, token_id, log_prob):
 		self.finished = False   # Determine if the hypothesis decoding is finished
 		self.prev_node = prev_node
 		self.token_id = token_id
@@ -299,11 +300,6 @@ class BeamSearchNode(object):
 		else:
 			self.seq_tokens = prev_node.seq_tokens + [token_id]
 
-		if prev_node is None:
-			self.acc_attention = last_layer_attention
-		else:
-			self.acc_attention = prev_node.acc_attention + last_layer_attention
-
 		self.seq_len = len(self.seq_tokens)
 
 		if token_id == Constants.EOS:
@@ -312,7 +308,7 @@ class BeamSearchNode(object):
 	def set_log_prob(self, log_prob):
 		self.log_prob = log_prob
 
-	# Get beam sore using Wu's length normalization and coverage penalty (https://arxiv.org/abs/1609.08144)
+	# Get beam sore with Wu's length normalization (https://arxiv.org/abs/1609.08144)
 	# Adopt pytorch code from https://github.com/NVIDIA/DeepLearningExamples/blob/master/PyTorch/Translation/GNMT/seq2seq/inference/beam_search.py
 	def eval(self):
 		score = self.log_prob
@@ -322,13 +318,6 @@ class BeamSearchNode(object):
 		length_norm = (norm_const + self.seq_len) / (norm_const + 1.0)
 		length_norm = length_norm ** Params.len_norm_factor
 		score = score / length_norm
-
-		# Set Params.cov_penalty_factor = 0 will disable coverage penalty
-		coverage_penalty = self.acc_attention.clamp(0, 1)
-		coverage_penalty = coverage_penalty.log()
-		coverage_penalty[coverage_penalty == float('-inf')] = 0
-		coverage_penalty = coverage_penalty.sum(dim=-1)
-		score += Params.cov_penalty_factor * coverage_penalty
   
 		return score
 

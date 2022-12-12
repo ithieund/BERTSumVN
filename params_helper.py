@@ -53,8 +53,7 @@ def _parse_arguments():
 			parser.add_argument('-beam_size', type=int, default=5)
 			parser.add_argument('-n_best', type=int, default=3)
 			parser.add_argument('-min_tgt_len', type=int, default=10, help='Define min output sequence length to prevent too short sequence. Set 0 to disable this rule')
-			parser.add_argument('-len_norm_factor', type=float, default=0, help='Weight for Length normalization by Wu et al. Best value between 0.6 and 0.7 according to the paper. Set 0.0 to disable its effect')
-			parser.add_argument('-cov_penalty_factor', type=float, default=0, help='Weight for Coverage penalty by Wu et al. Best value is 0.2 according to the paper. Set 0.0 to disable its effect')
+			parser.add_argument('-len_norm_factor', type=float, default=0.6, help='Weight for Length normalization by Wu et al. Best value between 0.6 and 0.7 according to the paper. Set 0.0 to disable its effect')
 			parser.add_argument('-block_ngram_repeat', type=int, default=0, help='How long for the repeated n-gram to be blocked? Set 0 to disable ngram blocking')
 	elif executed_script_name == 'script_prepare_dataset.py':
 		parser.add_argument('-visible_gpus', type=str, default='-1', help='Which GPUs can be used')

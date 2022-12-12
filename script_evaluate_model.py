@@ -111,7 +111,7 @@ def decode_one_sample(model, dataloader, device):
 
 	for h in range(len(beam_hypotheses)):
 		score, tokens = beam_hypotheses[h]
-		logger.info(f'Beam Search H{h + 1} (score={"{:.3f}".format(-score.item())}): {tokenizer.decode(tokens, skip_special_tokens=True)}')
+		logger.info(f'Beam Search H{h + 1} (score={"{:.3f}".format(score)}): {tokenizer.decode(tokens, skip_special_tokens=True)}')
 
 
 def calculate_rouge(targets, summaries):
@@ -138,7 +138,7 @@ def calculate_rouge(targets, summaries):
 
 def save_eval_log(output_dir, training_log):
 	checkpoint_name = os.path.splitext(os.path.basename(Params.model_path))[0]
-	log_file_name = f'eval_log_{checkpoint_name}_beamsize{Params.beam_size}_minlen{Params.min_tgt_len}_lennorm{Params.len_norm_factor}_covpenalty{Params.cov_penalty_factor}_ngram{Params.block_ngram_repeat}.json'
+	log_file_name = f'eval_log_{checkpoint_name}_beamsize{Params.beam_size}_minlen{Params.min_tgt_len}_lennorm{Params.len_norm_factor}_ngram{Params.block_ngram_repeat}.json'
 	log_file_path = os.path.join(output_dir, log_file_name)
 
 	with open(log_file_path, 'w', encoding='utf8') as f:
