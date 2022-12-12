@@ -110,6 +110,24 @@ def get_model(rank, device, checkpoint, output_dir):
 	return model
 
 
+def get_optimizer(model, checkpoint):
+	model_params = list(model.named_parameters())
+	no_decay_params = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+
+	grouped_params = [
+		{'params': [p for n, p in model_params if not any(nd in n for nd in no_decay_params)], 'weight_decay': 0.01},
+		{'params': [p for n, p in model_params if any(nd in n for nd in no_decay_params)], 'weight_decay': 0.0}
+	]
+
+	optimizer = torch.optim.AdamW(grouped_params, lr=Params.learning_rate)
+ 
+	if checkpoint is not None:
+		logger.info(f'Loading optimizer from checkpoint')
+		optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+	return optimizer
+
+
 def get_train_dataloader(rank, world_size):
 	print('\n\n')
  
@@ -159,40 +177,16 @@ def cal_performance(logits, ground):
 	logits = logits.view(-1, logits.size(-1))
 	ground = ground.contiguous().view(-1)
 
-	loss = cal_loss(logits, ground)
+	# Get cross_entropy losss with label smoothing
+	loss = F.cross_entropy(logits, ground, ignore_index=Constants.PAD, label_smoothing=Params.label_smoothing_factor)
 
+	# Get statistics
 	pad_mask = ground.ne(Constants.PAD)
 	pred = logits.max(-1)[1]
 	correct = pred.eq(ground)
 	correct = correct.masked_select(pad_mask).sum().item()
 	n_tokens = pad_mask.sum().item()
 	return loss, correct, n_tokens
-
-
-def cal_loss(logits, ground):
-	def label_smoothing(logits, labels, eps):
-		num_classes = logits.size(-1)
-
-		# >>> z = torch.zeros(2, 4).scatter_(1, torch.tensor([[2], [3]]), 1.23)
-		# >>> z
-		# tensor([[ 0.0000,  0.0000,  1.2300,  0.0000],
-		#        [ 0.0000,  0.0000,  0.0000,  1.2300]])
-		one_hot = torch.zeros_like(logits).scatter(1, labels.view(-1, 1), 1)
-		one_hot = one_hot * (1 - eps) + (1 - one_hot) * eps / (num_classes - 1)
-		log_prb = F.log_softmax(logits, dim=1)
-		non_pad_mask = ground.ne(Constants.PAD)
-		loss = -(one_hot * log_prb).sum(dim=1)
-		loss = loss.masked_select(non_pad_mask).mean()
-		return loss
-
-	if Params.label_smoothing_factor > 0:
-		loss = label_smoothing(logits, ground, Params.label_smoothing_factor)
-	else:
-		loss = F.cross_entropy(logits, ground, ignore_index=Constants.PAD)
-		# criterion = nn.CrossEntropyLoss(ignore_index=Constants.PAD)
-		# loss = criterion(logits, ground)
-
-	return loss
 
 
 def init_parameters(model):
@@ -299,11 +293,7 @@ def train(rank, world_size, output_dir):
 	model = get_model(rank, device, checkpoint, output_dir)
 	init_parameters(model)
 
-	optimizer = AdamW(model.parameters(), lr=Params.learning_rate, correct_bias=False)
- 
-	if checkpoint is not None:
-		logger.info(f'Loading optimizer from checkpoint')
-		optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+	optimizer = get_optimizer(model, checkpoint)
 
 	# Free up memory
 	del checkpoint
