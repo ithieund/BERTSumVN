@@ -97,20 +97,41 @@ class BertAbsSum(nn.Module):
 		self.decoder = BertDecoder(config=config, device=device)
 
 		# Count total params
-		enc_params = sum(p.numel() for p in self.encoder.parameters())
-		dec_params = sum(p.numel() for p in self.decoder.parameters())
-		total_params = enc_params + dec_params
+		stats = self.get_model_stats()
+		enc_params = stats['enc_params']
+		dec_params = stats['dec_params']
+		total_params = stats['total_params']
 		logger.info(f'Encoder total parameters: {enc_params:,}')
 		logger.info(f'Decoder total parameters: {dec_params:,}')
 		logger.info(f'Total model parameters: {total_params:,}')
 		
 		if Params.mode == 'train':
-			enc_trainable_params = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
-			dec_trainable_params = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
-			total_trainable_params = enc_trainable_params + dec_trainable_params
+			enc_trainable_params = stats['enc_trainable_params']
+			dec_trainable_params = stats['dec_trainable_params']
+			total_trainable_params = stats['total_trainable_params']
 			logger.info(f'Encoder trainable parameters: {enc_trainable_params:,}')
 			logger.info(f'Decoder trainable parameters: {dec_trainable_params:,}')
 			logger.info(f'Total trainable parameters: {total_trainable_params:,}')
+
+	def get_model_stats(self):
+		enc_params = sum(p.numel() for p in self.encoder.parameters())
+		dec_params = sum(p.numel() for p in self.decoder.parameters())
+		total_params = enc_params + dec_params
+
+		enc_trainable_params = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
+		dec_trainable_params = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
+		total_trainable_params = enc_trainable_params + dec_trainable_params
+
+		stats = {
+			'enc_params': enc_params,
+			'dec_params': dec_params,
+			'total_params': total_params,
+			'enc_trainable_params': enc_trainable_params,
+			'dec_trainable_params': dec_trainable_params,
+			'total_trainable_params': total_trainable_params,
+		}
+
+		return stats
 
 	# @timing
 	def forward(self, batch_src_seq, batch_src_mask, batch_tgt_seq, batch_tgt_mask):
