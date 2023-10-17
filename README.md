@@ -8,6 +8,7 @@ This code is for experiments from the paper which is accepted by ICIC-ELB in May
 
 Title: EXPLORING ABSTRACTIVE SUMMARIZATION METHODS FOR VIETNAMESE USING PRE-TRAINED BERT MODELS
 Authors: Duy Hieu Nguyen, Trong Nghia Hoang, Dien Dinh and Long H.B. Nguyen.
+Link: [http://www.icicelb.org/ellb/contents/2023/11/elb-14-11-04.pdf](http://www.icicelb.org/ellb/contents/2023/11/elb-14-11-04.pdf)
 
 We release this code to motivate further research on Vietnamese Abstractive Summarization tasks.
 
