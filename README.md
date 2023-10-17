@@ -4,19 +4,16 @@ Vietnamese Abstractive Summarization using pre-trained BERT models.
 
 ## Description
 
-This code is for experiments from the paper which is accepted by ICIC-ELB on 13 April 2023
+This code is for experiments from the paper which is accepted by ICIC-ELB in May 2023.
 
-Reference No.: ICICELB-2302-006
 Title: EXPLORING ABSTRACTIVE SUMMARIZATION METHODS FOR VIETNAMESE USING PRE-TRAINED BERT MODELS
-Authors: Duy Hieu Nguyen, Trong Nghia Hoang, Dien Dinh and Long H.B. Nguyen
+Authors: Duy Hieu Nguyen, Trong Nghia Hoang, Dien Dinh and Long H.B. Nguyen.
 
 We release this code to motivate further research on Vietnamese Abstractive Summarization tasks.
 
 If you use this code for your work, please cite our paper with the following info:
 
-> Duy Hieu Nguyen, Trong Nghia Hoang, Dien Dinh and Long H.B. Nguyen. 2023. EXPLORING ABSTRACTIVE SUMMARIZATION METHODS FOR VIETNAMESE USING PRE-TRAINED BERT MODELS, ICIC International, Volume xx, Number xx, pages xx-xx. DOI: xxxxxxxxxx
-
-Note: the Volume, Number, pages and DOI number will be available later when the paper is finally published.
+> Duy Hieu Nguyen, Trong Nghia Hoang, Dien Dinh and Long H.B. Nguyen. 2023. EXPLORING ABSTRACTIVE SUMMARIZATION METHODS FOR VIETNAMESE USING PRE-TRAINED BERT MODELS. In ICIC Express Letters Part B: Applications, Volume 14, Number 11, pages 1143-1151. DOI: 10.24507/icicelb.14.11.1143.
 
 **Credits**:
 
